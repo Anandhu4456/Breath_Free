@@ -1,8 +1,9 @@
 import React, { useState, useCallback } from 'react';
-import { StyleSheet, Text, View, ScrollView, TouchableOpacity, Alert, Modal, Dimensions } from 'react-native';
+import { StyleSheet, Text, View, ScrollView, TouchableOpacity, Alert, Modal, Dimensions, TextInput } from 'react-native';
 import { useFocusEffect } from 'expo-router';
 import * as Haptics from 'expo-haptics';
 import * as FileSystem from 'expo-file-system/legacy';
+import * as DocumentPicker from 'expo-document-picker';
 import { Ionicons } from '@expo/vector-icons';
 import { 
   useAudioRecorder, 
@@ -16,19 +17,14 @@ import { getVoiceMappings, saveVoiceMapping, deleteVoiceMapping } from '../../ut
 
 const { width } = Dimensions.get('window');
 
-const SCENARIOS = [
-  { count: 1, title: '1st Cigarette', subtitle: 'Warning when user logs their first smoke of the day' },
-  { count: 2, title: '2nd Cigarette', subtitle: 'Warning for the second log of the day' },
-  { count: 3, title: '3rd Cigarette (Direct)', subtitle: 'Urgent warning for the third log (e.g. "myre nirth")' },
-  { count: 4, title: '4th Cigarette', subtitle: 'Critical warning for the fourth smoke' },
-  { count: 5, title: '5th Cigarette', subtitle: 'High-alert warning for the fifth smoke' },
-  { count: 0, title: 'Default Fallback', subtitle: 'Triggered for any count that does not have a specific recording' },
-];
-
 export default function AdminSettings() {
   // Voice mappings state
   const [voiceMappings, setVoiceMappings] = useState<Record<number, string>>({});
   const [currentlyPlayingSlot, setCurrentlyPlayingSlot] = useState<number | null>(null);
+
+  // Modal states for custom cigarette warnings
+  const [addModalVisible, setAddModalVisible] = useState(false);
+  const [newSlotCount, setNewSlotCount] = useState('');
 
   // Recording state
   const [activeRecordSlot, setActiveRecordSlot] = useState<number | null>(null);
@@ -62,8 +58,6 @@ export default function AdminSettings() {
       Alert.alert('Permission Denied', 'Microphone permissions are required to record warnings.');
     }
   };
-
-
 
   const stopCurrentPlayer = useCallback(() => {
     if (currentPlayer) {
@@ -233,6 +227,77 @@ export default function AdminSettings() {
     setHasRecorded(false);
   };
 
+  const handlePickAudioFile = async (slotCount: number) => {
+    try {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      
+      const result = await DocumentPicker.getDocumentAsync({
+        type: 'audio/*',
+        copyToCacheDirectory: true,
+      });
+
+      if (result.canceled || !result.assets || result.assets.length === 0) {
+        return;
+      }
+
+      const pickedAsset = result.assets[0];
+      const sourceUri = pickedAsset.uri;
+
+      // Generate a unique file name in document directory
+      const extension = pickedAsset.name.split('.').pop() || 'mp3';
+      const fileName = `warning_${slotCount}_uploaded_${Date.now()}.${extension}`;
+      const targetUri = `${FileSystem.documentDirectory}${fileName}`;
+
+      // Copy file to target local directory
+      await FileSystem.copyAsync({
+        from: sourceUri,
+        to: targetUri,
+      });
+
+      // Delete old mapping file if exists
+      const oldUri = voiceMappings[slotCount];
+      if (oldUri) {
+        try {
+          await FileSystem.deleteAsync(oldUri, { idempotent: true });
+        } catch (err) {
+          console.warn('Failed to delete old file:', err);
+        }
+      }
+
+      // Save mapping in storage
+      const updated = await saveVoiceMapping(slotCount, targetUri);
+      setVoiceMappings(updated);
+
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      Alert.alert('Success', `Audio file "${pickedAsset.name}" successfully set for warning!`);
+    } catch (e) {
+      console.error('Error picking audio file:', e);
+      Alert.alert('Error', 'Failed to pick or copy the audio file.');
+    }
+  };
+
+  const handleActionChoice = (slotCount: number) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    Alert.alert(
+      'Set Custom Warning Sound',
+      `Choose how you want to set the Malayalam voice warning for Cigarette #${slotCount}:`,
+      [
+        {
+          text: 'Record via Microphone',
+          onPress: () => handleOpenRecorder(slotCount),
+        },
+        {
+          text: 'Upload Audio File (MP3/M4A)',
+          onPress: () => handlePickAudioFile(slotCount),
+        },
+        {
+          text: 'Cancel',
+          style: 'cancel',
+        },
+      ]
+    );
+  };
+
   // Utility to format ms duration into mm:ss
   const formatDuration = (ms: number) => {
     const totalSeconds = Math.floor(ms / 1000);
@@ -257,12 +322,16 @@ export default function AdminSettings() {
           <Ionicons name="cog-outline" size={32} color="#10B981" />
         </View>
 
-
-
         {/* CUSTOM MALAYALAM VOICE LIST */}
-        <Text style={styles.sectionTitle}>Malayalam Warning Voices</Text>
+        <View style={styles.sectionHeaderRow}>
+          <Text style={styles.sectionTitle}>Malayalam Warning Voices</Text>
+          <TouchableOpacity onPress={() => setAddModalVisible(true)} style={styles.addButton}>
+            <Ionicons name="add-circle-outline" size={16} color="#10B981" style={{ marginRight: 4 }} />
+            <Text style={styles.addText}>Add Warning</Text>
+          </TouchableOpacity>
+        </View>
         <Text style={styles.sectionSubtitle}>
-          Record specific Malayalam warnings (slang, jokes, insults) to play when cigarette thresholds are met.
+          Record/upload warnings for specific cigarette thresholds, or set a general default fallback alert.
         </Text>
 
         {/* Permission Callout if Denied */}
@@ -279,73 +348,80 @@ export default function AdminSettings() {
           </View>
         )}
 
-        {SCENARIOS.map((item) => {
-          const recordingUri = voiceMappings[item.count];
-          const hasRecording = !!recordingUri;
-          const isPlaying = currentlyPlayingSlot === item.count;
+        {(() => {
+          // Dynamic warning list: only show counts that have active recordings in voiceMappings
+          const activeSlots = Object.keys(voiceMappings)
+            .map(Number)
+            .sort((a, b) => a - b);
 
-          return (
-            <View key={item.count} style={styles.voiceCard}>
-              <View style={styles.voiceCardHeader}>
-                <View style={{ flex: 1, paddingRight: 8 }}>
-                  <View style={styles.titleRow}>
-                    <Text style={styles.voiceCardTitle}>{item.title}</Text>
-                    {hasRecording ? (
+          if (activeSlots.length === 0) {
+            return (
+              <View style={styles.emptyContainer}>
+                <Ionicons name="volume-mute-outline" size={48} color="#475569" style={{ marginBottom: 12 }} />
+                <Text style={styles.emptyTitle}>No Warning Voices</Text>
+                <Text style={styles.emptyText}>
+                  Tap "Add Warning" at the top to record or upload a Malayalam warning voice.
+                </Text>
+              </View>
+            );
+          }
+
+          return activeSlots.map((count) => {
+            const recordingUri = voiceMappings[count];
+            const isPlaying = currentlyPlayingSlot === count;
+
+            const title = count === 0 ? 'Default Fallback Alert' : `Cigarette Alert #${count}`;
+            const subtitle = count === 0
+              ? 'Fallback alert played for general cigarette thresholds'
+              : `Alert note played when user consumes cigarette #${count} of the day`;
+
+            return (
+              <View key={count} style={styles.voiceCard}>
+                <View style={styles.voiceCardHeader}>
+                  <View style={{ flex: 1, paddingRight: 8 }}>
+                    <View style={styles.titleRow}>
+                      <Text style={styles.voiceCardTitle}>{title}</Text>
                       <View style={styles.badgeRecorded}>
                         <Text style={styles.badgeRecordedText}>Recorded</Text>
                       </View>
-                    ) : (
-                      <View style={styles.badgeTts}>
-                        <Text style={styles.badgeTtsText}>TTS Fallback</Text>
-                      </View>
-                    )}
+                    </View>
+                    <Text style={styles.voiceCardSubtitle}>{subtitle}</Text>
                   </View>
-                  <Text style={styles.voiceCardSubtitle}>{item.subtitle}</Text>
+                </View>
+
+                <View style={styles.dividerLight} />
+
+                <View style={styles.actionButtons}>
+                  {recordingUri && (
+                    <>
+                      <TouchableOpacity 
+                        style={[styles.actionBtn, styles.playBtn, isPlaying && styles.playingBtn]} 
+                        onPress={() => handlePlayVoice(count, recordingUri)}
+                      >
+                        <Ionicons 
+                          name={isPlaying ? 'square' : 'play'} 
+                          size={16} 
+                          color={isPlaying ? '#EF4444' : '#10B981'} 
+                        />
+                        <Text style={[styles.actionBtnText, { color: isPlaying ? '#EF4444' : '#10B981', marginLeft: 6 }]}>
+                          {isPlaying ? 'Stop' : 'Listen'}
+                        </Text>
+                      </TouchableOpacity>
+
+                      <TouchableOpacity 
+                        style={[styles.actionBtn, styles.deleteBtn]} 
+                        onPress={() => handleDeleteVoice(count)}
+                      >
+                        <Ionicons name="trash-outline" size={16} color="#EF4444" />
+                        <Text style={[styles.actionBtnText, { color: '#EF4444', marginLeft: 6 }]}>Delete</Text>
+                      </TouchableOpacity>
+                    </>
+                  )}
                 </View>
               </View>
-
-              <View style={styles.dividerLight} />
-
-              <View style={styles.actionButtons}>
-                {hasRecording ? (
-                  <>
-                    <TouchableOpacity 
-                      style={[styles.actionBtn, styles.playBtn, isPlaying && styles.playingBtn]} 
-                      onPress={() => handlePlayVoice(item.count, recordingUri)}
-                    >
-                      <Ionicons 
-                        name={isPlaying ? 'square' : 'play'} 
-                        size={16} 
-                        color={isPlaying ? '#EF4444' : '#10B981'} 
-                      />
-                      <Text style={[styles.actionBtnText, { color: isPlaying ? '#EF4444' : '#10B981', marginLeft: 6 }]}>
-                        {isPlaying ? 'Stop' : 'Listen'}
-                      </Text>
-                    </TouchableOpacity>
-
-                    <TouchableOpacity 
-                      style={[styles.actionBtn, styles.deleteBtn]} 
-                      onPress={() => handleDeleteVoice(item.count)}
-                    >
-                      <Ionicons name="trash-outline" size={16} color="#EF4444" />
-                      <Text style={[styles.actionBtnText, { color: '#EF4444', marginLeft: 6 }]}>Delete</Text>
-                    </TouchableOpacity>
-                  </>
-                ) : null}
-
-                <TouchableOpacity 
-                  style={[styles.actionBtn, styles.recordBtn, hasRecording && styles.recordBtnSecondary]} 
-                  onPress={() => handleOpenRecorder(item.count)}
-                >
-                  <Ionicons name="mic" size={16} color="#FFFFFF" />
-                  <Text style={[styles.actionBtnText, { color: '#FFFFFF', marginLeft: 6 }]}>
-                    {hasRecording ? 'Re-record' : 'Record Alert'}
-                  </Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-          );
-        })}
+            );
+          });
+        })()}
       </ScrollView>
 
       {/* RECORDING SYSTEM OVERLAY MODAL */}
@@ -442,6 +518,60 @@ export default function AdminSettings() {
           </View>
         </View>
       </Modal>
+
+      {/* ADD CUSTOM WARNING MODAL */}
+      <Modal
+        visible={addModalVisible}
+        transparent={true}
+        animationType="fade"
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>Add Custom Warning</Text>
+            <Text style={styles.modalSubtitle}>Enter the cigarette log number you want to trigger a warning for.</Text>
+
+            <View style={styles.formGroup}>
+              <Text style={styles.formLabel}>Cigarette Count Threshold</Text>
+              <TextInput
+                style={styles.formInput}
+                value={newSlotCount}
+                onChangeText={(val) => setNewSlotCount(val.replace(/[^0-9]/g, ''))}
+                keyboardType="numeric"
+                placeholder="e.g. 20"
+                placeholderTextColor="#475569"
+                autoFocus={true}
+              />
+            </View>
+
+            <View style={styles.modalActionRow}>
+              <TouchableOpacity 
+                style={[styles.modalBtn, styles.modalDiscard]} 
+                onPress={() => setAddModalVisible(false)}
+              >
+                <Text style={styles.modalBtnDiscardText}>Cancel</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity 
+                style={[styles.modalBtn, styles.modalSave]} 
+                onPress={() => {
+                  const countVal = parseInt(newSlotCount);
+                  if (isNaN(countVal) || countVal <= 0) {
+                    Alert.alert('Invalid Count', 'Please enter a valid cigarette count (greater than 0).');
+                    return;
+                  }
+                  setAddModalVisible(false);
+                  // Open action choice selector to record/upload sound for this slot
+                  setTimeout(() => {
+                    handleActionChoice(countVal);
+                  }, 300);
+                }}
+              >
+                <Text style={styles.modalBtnSaveText}>Next</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -470,63 +600,12 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: '700',
     letterSpacing: 2,
+    textTransform: 'uppercase',
   },
   headerTitle: {
     color: '#FFFFFF',
     fontSize: 28,
     fontWeight: '800',
-  },
-  sectionCard: {
-    backgroundColor: '#0F172A',
-    borderRadius: 20,
-    padding: 20,
-    borderWidth: 1,
-    borderColor: '#1E293B',
-    marginBottom: 25,
-  },
-  sectionCardTitle: {
-    color: '#FFFFFF',
-    fontSize: 16,
-    fontWeight: '700',
-  },
-  sectionCardDesc: {
-    color: '#64748B',
-    fontSize: 11,
-    marginTop: 4,
-    marginBottom: 16,
-  },
-  inputGroup: {
-    flexDirection: 'row',
-    marginBottom: 16,
-  },
-  inputLabel: {
-    color: '#94A3B8',
-    fontSize: 11,
-    fontWeight: '600',
-    marginBottom: 6,
-  },
-  textInput: {
-    backgroundColor: '#1E293B',
-    borderRadius: 10,
-    color: '#FFFFFF',
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    fontSize: 15,
-    borderWidth: 1,
-    borderColor: '#334155',
-  },
-  saveButton: {
-    backgroundColor: '#10B981',
-    borderRadius: 10,
-    paddingVertical: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
-    flexDirection: 'row',
-  },
-  saveButtonText: {
-    color: '#FFFFFF',
-    fontSize: 14,
-    fontWeight: '700',
   },
   sectionTitle: {
     color: '#FFFFFF',
@@ -537,48 +616,50 @@ const styles = StyleSheet.create({
   sectionSubtitle: {
     color: '#64748B',
     fontSize: 12,
-    marginBottom: 15,
+    marginBottom: 16,
+    lineHeight: 16,
   },
   permissionAlert: {
-    backgroundColor: '#78350F40',
-    borderRadius: 14,
-    padding: 16,
-    borderWidth: 1,
-    borderColor: '#D9770630',
     flexDirection: 'row',
+    backgroundColor: '#FBBF2410',
+    borderColor: '#FBBF2430',
+    borderWidth: 1,
+    borderRadius: 16,
+    padding: 16,
     marginBottom: 20,
+    alignItems: 'center',
   },
   permissionAlertTitle: {
-    color: '#F59E0B',
+    color: '#FBBF24',
     fontSize: 14,
     fontWeight: '700',
   },
   permissionAlertDesc: {
-    color: '#D97706',
+    color: '#94A3B8',
     fontSize: 11,
     marginTop: 2,
-    lineHeight: 16,
+    lineHeight: 14,
   },
   permissionButton: {
-    backgroundColor: '#D97706',
-    borderRadius: 8,
+    marginTop: 8,
+    backgroundColor: '#FBBF24',
     paddingVertical: 6,
     paddingHorizontal: 12,
-    marginTop: 10,
+    borderRadius: 8,
     alignSelf: 'flex-start',
   },
   permissionButtonText: {
-    color: '#FFFFFF',
-    fontSize: 12,
-    fontWeight: '600',
+    color: '#0F172A',
+    fontSize: 11,
+    fontWeight: '700',
   },
   voiceCard: {
     backgroundColor: '#0F172A',
-    borderRadius: 16,
-    padding: 16,
+    borderRadius: 20,
+    padding: 20,
     borderWidth: 1,
     borderColor: '#1E293B',
-    marginBottom: 12,
+    marginBottom: 16,
   },
   voiceCardHeader: {
     flexDirection: 'row',
@@ -588,79 +669,93 @@ const styles = StyleSheet.create({
   titleRow: {
     flexDirection: 'row',
     alignItems: 'center',
+    flexWrap: 'wrap',
   },
   voiceCardTitle: {
     color: '#FFFFFF',
     fontSize: 15,
     fontWeight: '700',
+    marginRight: 8,
+    marginBottom: 4,
   },
   voiceCardSubtitle: {
     color: '#64748B',
-    fontSize: 11,
-    marginTop: 4,
-    lineHeight: 15,
+    fontSize: 12,
+    marginTop: 2,
+    lineHeight: 16,
   },
   badgeRecorded: {
-    backgroundColor: '#10B98120',
+    backgroundColor: '#10B98115',
+    borderColor: '#10B98130',
+    borderWidth: 1,
     borderRadius: 6,
-    paddingHorizontal: 6,
     paddingVertical: 2,
-    marginLeft: 8,
+    paddingHorizontal: 6,
+    marginBottom: 4,
   },
   badgeRecordedText: {
     color: '#10B981',
     fontSize: 9,
     fontWeight: '700',
+    textTransform: 'uppercase',
   },
   badgeTts: {
-    backgroundColor: '#334155',
+    backgroundColor: '#3B82F615',
+    borderColor: '#3B82F630',
+    borderWidth: 1,
     borderRadius: 6,
-    paddingHorizontal: 6,
     paddingVertical: 2,
-    marginLeft: 8,
+    paddingHorizontal: 6,
+    marginBottom: 4,
   },
   badgeTtsText: {
-    color: '#94A3B8',
+    color: '#3B82F6',
     fontSize: 9,
     fontWeight: '700',
+    textTransform: 'uppercase',
   },
   dividerLight: {
     height: 1,
     backgroundColor: '#1E293B',
-    marginVertical: 12,
+    marginVertical: 14,
   },
   actionButtons: {
     flexDirection: 'row',
     justifyContent: 'flex-end',
   },
   actionBtn: {
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    borderRadius: 8,
     flexDirection: 'row',
     alignItems: 'center',
-    marginLeft: 10,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 10,
+    marginLeft: 8,
+    borderWidth: 1,
   },
   actionBtnText: {
     fontSize: 12,
-    fontWeight: '600',
+    fontWeight: '700',
   },
   playBtn: {
     backgroundColor: '#10B98115',
+    borderColor: '#10B98130',
   },
   playingBtn: {
     backgroundColor: '#EF444415',
+    borderColor: '#EF444430',
   },
   deleteBtn: {
-    backgroundColor: '#EF444415',
+    backgroundColor: '#EF444410',
+    borderColor: '#EF444420',
   },
   recordBtn: {
     backgroundColor: '#10B981',
+    borderColor: '#10B981',
   },
   recordBtnSecondary: {
-    backgroundColor: '#3B82F6',
+    backgroundColor: '#1E293B',
+    borderColor: '#334155',
   },
-  // Modal Recorder layout
   modalOverlay: {
     flex: 1,
     backgroundColor: '#000000AA',
@@ -674,7 +769,6 @@ const styles = StyleSheet.create({
     padding: 24,
     borderWidth: 1,
     borderColor: '#1E293B',
-    alignItems: 'center',
   },
   modalTitle: {
     color: '#FFFFFF',
@@ -688,6 +782,7 @@ const styles = StyleSheet.create({
     marginTop: 6,
     textAlign: 'center',
     marginBottom: 20,
+    lineHeight: 16,
   },
   recorderArea: {
     alignItems: 'center',
@@ -706,7 +801,6 @@ const styles = StyleSheet.create({
     borderRadius: 50,
     borderWidth: 2,
     borderColor: '#EF444440',
-    animationName: 'pulse', // Note: animations in React Native are handled through Reanimated, we use static designs for Modal simplicity
   },
   durationText: {
     color: '#FFFFFF',
@@ -726,6 +820,7 @@ const styles = StyleSheet.create({
     fontSize: 11,
     marginTop: 8,
     textAlign: 'center',
+    lineHeight: 14,
   },
   micButton: {
     backgroundColor: '#EF4444',
@@ -758,6 +853,7 @@ const styles = StyleSheet.create({
     marginVertical: 10,
     borderWidth: 1,
     borderColor: '#334155',
+    alignSelf: 'center',
   },
   previewButtonText: {
     color: '#10B981',
@@ -800,5 +896,70 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontWeight: '700',
     fontSize: 14,
+  },
+  sectionHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  addButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#10B98115',
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#10B98130',
+  },
+  addText: {
+    color: '#10B981',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  formGroup: {
+    marginBottom: 16,
+    width: '100%',
+  },
+  formLabel: {
+    color: '#94A3B8',
+    fontSize: 12,
+    fontWeight: '600',
+    marginBottom: 8,
+  },
+  formInput: {
+    backgroundColor: '#1E293B',
+    borderRadius: 12,
+    color: '#FFFFFF',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    fontSize: 16,
+    borderWidth: 1,
+    borderColor: '#334155',
+    width: '100%',
+  },
+  emptyContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 60,
+    backgroundColor: '#0F172A',
+    borderRadius: 24,
+    borderWidth: 1,
+    borderColor: '#1E293B',
+    marginTop: 10,
+    paddingHorizontal: 20,
+  },
+  emptyTitle: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  emptyText: {
+    color: '#64748B',
+    fontSize: 12,
+    textAlign: 'center',
+    marginTop: 6,
+    lineHeight: 16,
   },
 });
