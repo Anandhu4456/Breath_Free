@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { StyleSheet, Text, View, TouchableOpacity, ScrollView, Alert, Dimensions, Modal, TextInput, DeviceEventEmitter } from 'react-native';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { StyleSheet, Text, View, TouchableOpacity, ScrollView, Alert, Dimensions, Modal, TextInput, DeviceEventEmitter, Animated } from 'react-native';
 import { useFocusEffect } from 'expo-router';
 import * as Haptics from 'expo-haptics';
 import { Ionicons } from '@expo/vector-icons';
@@ -61,6 +61,340 @@ const HEALTH_MILESTONES: HealthProgress[] = [
 const PRESETS_COLORS = ['#EF4444', '#3B82F6', '#10B981', '#8B5CF6', '#F59E0B', '#EC4899', '#FACC15', '#06B6D4'];
 const PRESETS_ICONS = ['flame', 'star', 'leaf', 'trophy', 'skull', 'heart', 'alert-circle', 'ribbon'];
 
+// --- Pixel Lungs Component & Styles ---
+interface PixelLungsProps {
+  o2Level: number;
+  todayCount: number;
+  isDamaged: boolean;
+  onDamageEnd: () => void;
+}
+
+const LUNGS_GRID = [
+  [0, 0, 0, 0, 1, 1, 0, 0, 0, 0], // Trachea
+  [0, 0, 0, 0, 1, 1, 0, 0, 0, 0], // Trachea
+  [0, 0, 0, 1, 1, 1, 1, 0, 0, 0], // Bronchi split
+  [0, 1, 1, 1, 0, 0, 1, 1, 1, 0], // Lungs start
+  [1, 1, 1, 1, 0, 0, 1, 1, 1, 1],
+  [1, 1, 1, 1, 0, 0, 1, 1, 1, 1],
+  [1, 1, 1, 1, 0, 0, 1, 1, 1, 1],
+  [1, 1, 1, 1, 0, 0, 1, 1, 1, 1],
+  [1, 1, 1, 1, 0, 0, 1, 1, 1, 1],
+  [0, 1, 1, 1, 0, 0, 1, 1, 1, 0],
+  [0, 0, 1, 1, 0, 0, 1, 1, 0, 0],
+];
+
+function PixelLungs({ o2Level, todayCount, isDamaged, onDamageEnd }: PixelLungsProps) {
+  const pulseAnim = useRef(new Animated.Value(1)).current;
+  const shakeAnim = useRef(new Animated.Value(0)).current;
+  const fillAnim = useRef(new Animated.Value(1)).current;
+  const luttappiScale = useRef(new Animated.Value(1)).current;
+  
+  const [currentFill, setCurrentFill] = useState(1);
+  const [flashState, setFlashState] = useState(false);
+  const [particles, setParticles] = useState<{ id: number; left: number; top: Animated.Value; opacity: Animated.Value; size: number }[]>([]);
+
+  // 1. Listen to updates on fillAnim and set the state
+  useEffect(() => {
+    const listenerId = fillAnim.addListener(({ value }) => {
+      setCurrentFill(value);
+    });
+    return () => {
+      fillAnim.removeListener(listenerId);
+    };
+  }, []);
+
+  // 2. Animate fillAnim when targetHealthy changes
+  const basePollution = Math.min(0.8, todayCount * 0.1);
+  const recoveryFactor = (o2Level - 50) / 50;
+  const targetPollution = basePollution * (1 - recoveryFactor);
+  const targetHealthy = Math.max(0.2, Math.min(1.0, 1 - targetPollution));
+
+  useEffect(() => {
+    Animated.timing(fillAnim, {
+      toValue: targetHealthy,
+      duration: 1500, // 1.5 seconds smooth fill animation
+      useNativeDriver: false,
+    }).start();
+  }, [targetHealthy]);
+
+  // 3. Continuous breathing pulse animation
+  useEffect(() => {
+    const pulse = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulseAnim, {
+          toValue: 1.05,
+          duration: 1800,
+          useNativeDriver: true,
+        }),
+        Animated.timing(pulseAnim, {
+          toValue: 0.98,
+          duration: 1800,
+          useNativeDriver: true,
+        }),
+      ])
+    );
+    pulse.start();
+    return () => pulse.stop();
+  }, []);
+
+  // 4. Shake, flash, and spawn smoke particles on damage trigger
+  useEffect(() => {
+    let flashInterval: any;
+    if (isDamaged) {
+      // Flash state alternating
+      flashInterval = setInterval(() => {
+        setFlashState(f => !f);
+      }, 100);
+
+      // Snappy shake/cough animation
+      Animated.sequence([
+        Animated.timing(shakeAnim, { toValue: 10, duration: 60, useNativeDriver: true }),
+        Animated.timing(shakeAnim, { toValue: -10, duration: 60, useNativeDriver: true }),
+        Animated.timing(shakeAnim, { toValue: 8, duration: 60, useNativeDriver: true }),
+        Animated.timing(shakeAnim, { toValue: -8, duration: 60, useNativeDriver: true }),
+        Animated.timing(shakeAnim, { toValue: 6, duration: 60, useNativeDriver: true }),
+        Animated.timing(shakeAnim, { toValue: -6, duration: 60, useNativeDriver: true }),
+        Animated.timing(shakeAnim, { toValue: 4, duration: 60, useNativeDriver: true }),
+        Animated.timing(shakeAnim, { toValue: -4, duration: 60, useNativeDriver: true }),
+        Animated.timing(shakeAnim, { toValue: 0, duration: 60, useNativeDriver: true }),
+      ]).start(() => {
+        onDamageEnd();
+      });
+
+      // Spawn smoke particles
+      const newParticles = Array.from({ length: 15 }).map((_, idx) => {
+        const topVal = new Animated.Value(40);
+        const opacityVal = new Animated.Value(1);
+        return {
+          id: Date.now() + idx,
+          left: 10 + Math.random() * 80, // Random X positioning
+          top: topVal,
+          opacity: opacityVal,
+          size: Math.random() > 0.4 ? 6 : 4,
+        };
+      });
+      setParticles(newParticles);
+
+      // Animate smoke particles floating up and fading
+      newParticles.forEach((p) => {
+        Animated.parallel([
+          Animated.timing(p.top, {
+            toValue: -30 - Math.random() * 70, // Drift up
+            duration: 800 + Math.random() * 1200,
+            useNativeDriver: true,
+          }),
+          Animated.timing(p.opacity, {
+            toValue: 0,
+            duration: 800 + Math.random() * 1200,
+            useNativeDriver: true,
+          }),
+        ]).start();
+      });
+    } else {
+      setFlashState(false);
+      setParticles([]);
+    }
+
+    return () => {
+      if (flashInterval) clearInterval(flashInterval);
+    };
+  }, [isDamaged]);
+
+  // 5. Pulsating scale animation for Luttappi sticker when active
+  useEffect(() => {
+    let loop: Animated.CompositeAnimation;
+    if (currentFill <= 0.3) {
+      loop = Animated.loop(
+        Animated.sequence([
+          Animated.timing(luttappiScale, {
+            toValue: 1.15,
+            duration: 650,
+            useNativeDriver: true,
+          }),
+          Animated.timing(luttappiScale, {
+            toValue: 0.95,
+            duration: 650,
+            useNativeDriver: true,
+          }),
+        ])
+      );
+      loop.start();
+    } else {
+      luttappiScale.setValue(1);
+    }
+    return () => {
+      if (loop) loop.stop();
+    };
+  }, [currentFill <= 0.3]);
+
+  const renderPixel = (val: number, rIdx: number, pIdx: number) => {
+    if (val === 0) {
+      return <View key={`${rIdx}-${pIdx}`} style={[lungsStyles.pixel, lungsStyles.pixelEmpty]} />;
+    }
+
+    // Determine colors
+    let pixelColor = '#10B981'; // healthy emerald default
+
+    if (isDamaged) {
+      pixelColor = flashState ? '#EF4444' : '#475569'; // Warning red or dull ash
+    } else if (rIdx < 3) {
+      // Windpipe/trachea is neutral structure color
+      pixelColor = '#64748B'; 
+    } else {
+      // Healthy fill based on target fill from animation (0.2 is fully polluted, 1.0 is healthy)
+      const lungHeightFraction = (10 - rIdx) / 7; // 0 for row 10 (bottom), 1 for row 3 (top)
+      const isHealthy = lungHeightFraction <= currentFill;
+
+      if (isHealthy) {
+        // Blended healthy color: gradient from cyan at the bottom to green at the top
+        pixelColor = rIdx > 6 ? '#06B6D4' : '#10B981'; 
+      } else {
+        // Unhealthy/polluted section
+        pixelColor = '#334155'; // Dark slate
+      }
+    }
+
+    return (
+      <View
+        key={`${rIdx}-${pIdx}`}
+        style={[lungsStyles.pixel, { backgroundColor: pixelColor }]}
+      />
+    );
+  };
+
+  return (
+    <View style={lungsStyles.container}>
+      {/* Particle smoke container */}
+      <View style={lungsStyles.particlesContainer}>
+        {particles.map((p) => (
+          <Animated.View
+            key={p.id}
+            style={[
+              lungsStyles.smokeParticle,
+              {
+                left: `${p.left}%`,
+                transform: [{ translateY: p.top }],
+                opacity: p.opacity,
+                width: p.size,
+                height: p.size,
+                borderRadius: p.size / 2,
+              },
+            ]}
+          />
+        ))}
+      </View>
+
+      {/* Main Lung Pixel Grid */}
+      <Animated.View
+        style={{
+          transform: [
+            { scale: pulseAnim },
+            { translateX: shakeAnim },
+          ],
+        }}
+      >
+        <View style={lungsStyles.gridContainer}>
+          {LUNGS_GRID.map((row, rIdx) => (
+            <View key={rIdx} style={lungsStyles.row}>
+              {row.map((val, pIdx) => renderPixel(val, rIdx, pIdx))}
+            </View>
+          ))}
+        </View>
+      </Animated.View>
+
+      {/* Angry Luttappi overlay when lungs are polluted (fill drops below 0.3) */}
+      {currentFill <= 0.3 && (
+        <>
+          <Animated.Image
+            source={require('../../assets/images/luttappi.png')}
+            style={[
+              lungsStyles.luttappiImage,
+              { transform: [{ scale: luttappiScale }] }
+            ]}
+          />
+          <View style={lungsStyles.luttappiSpeechBubble}>
+            <Text style={lungsStyles.luttappiSpeechText}>
+              നിന്റെ കുണ്ടിക്ക് ഞാൻ കുത്തും, മൈരേ.
+            </Text>
+          </View>
+        </>
+      )}
+    </View>
+  );
+}
+
+const lungsStyles = StyleSheet.create({
+  container: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginVertical: 12,
+    height: 145,
+    width: '100%',
+  },
+  particlesContainer: {
+    position: 'absolute',
+    top: -20,
+    width: 120,
+    height: 60,
+    zIndex: 10,
+  },
+  smokeParticle: {
+    position: 'absolute',
+    backgroundColor: '#94A3B8',
+  },
+  gridContainer: {
+    padding: 8,
+    backgroundColor: '#090D16',
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#1E293B',
+  },
+  row: {
+    flexDirection: 'row',
+  },
+  pixel: {
+    width: 8,
+    height: 8,
+    margin: 1.5,
+    borderRadius: 1.5,
+  },
+  pixelEmpty: {
+    backgroundColor: 'transparent',
+  },
+  luttappiImage: {
+    position: 'absolute',
+    alignSelf: 'center',
+    width: 95,
+    height: 95,
+    resizeMode: 'contain',
+    zIndex: 20,
+    top: 25, // Centered over the lungs vertically
+  },
+  luttappiSpeechBubble: {
+    position: 'absolute',
+    bottom: -15, // float slightly below the lung container boundary
+    backgroundColor: '#EF4444',
+    paddingVertical: 4,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#FFFFFF',
+    alignSelf: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 3.84,
+    elevation: 5,
+    zIndex: 30,
+  },
+  luttappiSpeechText: {
+    color: '#FFFFFF',
+    fontSize: 10,
+    fontWeight: '800',
+    textAlign: 'center',
+  },
+});
+
 export default function Dashboard() {
   // Logs & settings state
   const [logs, setLogs] = useState<CigaretteLog[]>([]);
@@ -72,6 +406,19 @@ export default function Dashboard() {
   const [todayCost, setTodayCost] = useState(0);
   const [timeSinceLast, setTimeSinceLast] = useState<number | null>(null);
   const [timeString, setTimeString] = useState('Clean!');
+
+  // Lungs animation and logic state
+  const [isLungsDamaged, setIsLungsDamaged] = useState(false);
+
+  const getO2Level = () => {
+    if (timeSinceLast === null) return 100;
+    const targetMs = 8 * 60 * 60 * 1000; // O2 level recovers in 8 hours
+    const ratio = timeSinceLast / targetMs;
+    const level = 50 + ratio * 50;
+    return Math.min(100, Math.max(50, parseFloat(level.toFixed(1))));
+  };
+
+  const o2Level = getO2Level();
 
   // Custom Brand Modal states
   const [modalVisible, setModalVisible] = useState(false);
@@ -191,6 +538,7 @@ export default function Dashboard() {
   const handleLogSmoke = async (name: string, price: number, quantity: number = 1) => {
     try {
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+      setIsLungsDamaged(true);
 
       // Save logs multiple times in a loop if quantity > 1
       for (let i = 0; i < quantity; i++) {
@@ -273,6 +621,21 @@ export default function Dashboard() {
         <Text style={styles.timerLabel}>TIME SINCE LAST CIGARETTE</Text>
         <Text style={styles.timerValue}>{timeString}</Text>
         
+        {/* Animated Pixel Lungs & O2 Badge */}
+        <PixelLungs
+          o2Level={o2Level}
+          todayCount={todayCount}
+          isDamaged={isLungsDamaged}
+          onDamageEnd={() => setIsLungsDamaged(false)}
+        />
+
+        <View style={styles.o2BadgeContainer}>
+          <Ionicons name="leaf" size={12} color={o2Level === 100 ? '#10B981' : '#3B82F6'} />
+          <Text style={[styles.o2BadgeText, { color: o2Level === 100 ? '#10B981' : '#3B82F6' }]}>
+            O2 LEVEL: {o2Level}% {o2Level === 100 ? '(RESTORED)' : '(RECOVERING)'}
+          </Text>
+        </View>
+
         <View style={styles.divider} />
 
         <View style={styles.statsRow}>
@@ -929,5 +1292,22 @@ const styles = StyleSheet.create({
     backgroundColor: '#EF444415',
     borderWidth: 1,
     borderColor: '#EF444430',
+  },
+  o2BadgeContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#0F172A',
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 20,
+    marginTop: 12,
+    borderWidth: 1,
+    borderColor: '#1E293B',
+  },
+  o2BadgeText: {
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 1.2,
+    marginLeft: 6,
   },
 });

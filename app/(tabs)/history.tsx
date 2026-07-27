@@ -6,6 +6,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { 
   getLogs, 
   deleteLog, 
+  clearAllLogs,
   getAppSettings, 
   getCigaretteTypes, 
   CigaretteLog, 
@@ -105,6 +106,27 @@ export default function History() {
             const updated = await deleteLog(id);
             setLogs(updated);
             loadData(); // Re-calculate statistics
+            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+          }
+        }
+      ]
+    );
+  };
+
+  const handleClearAllLogs = () => {
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+    Alert.alert(
+      'Clear All Logs',
+      'Are you sure you want to delete your entire cigarette consumption history? This action cannot be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Clear All',
+          style: 'destructive',
+          onPress: async () => {
+            await clearAllLogs();
+            setLogs([]);
+            loadData();
             Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
           }
         }
@@ -388,7 +410,15 @@ export default function History() {
           </View>
         </View>
 
-        <Text style={styles.sectionTitle}>Activity Logs</Text>
+        <View style={styles.sectionHeaderRow}>
+          <Text style={styles.sectionTitle}>Activity Logs</Text>
+          {logs.length > 0 && (
+            <TouchableOpacity onPress={handleClearAllLogs} style={styles.clearAllButton}>
+              <Ionicons name="trash-bin-outline" size={14} color="#EF4444" style={{ marginRight: 4 }} />
+              <Text style={styles.clearAllText}>Clear All</Text>
+            </TouchableOpacity>
+          )}
+        </View>
         <Text style={styles.sectionSubtitle}>Recent entries (Tap trash icon to delete/undo)</Text>
 
         {logs.length === 0 ? (
@@ -845,5 +875,27 @@ const styles = StyleSheet.create({
     textTransform: 'uppercase',
     fontWeight: '700',
     letterSpacing: 0.5,
+  },
+  sectionHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 4,
+    marginTop: 20,
+  },
+  clearAllButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#EF444415',
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#EF444430',
+  },
+  clearAllText: {
+    color: '#EF4444',
+    fontSize: 12,
+    fontWeight: '700',
   },
 });
